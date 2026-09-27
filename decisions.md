@@ -1,0 +1,111 @@
+# Architecture & Implementation Decisions: magicpin AI Challenge (Vera)
+
+This document provides a concise, structured mapping between the implementation plan in `readme.md`, the dataset payloads (`dataset/`), the test contracts (`challenge-testing-brief.md`, `challenge-brief.md`), and the judge simulator (`judge_simulator.py`, `examples/`). Every key architectural and implementation decision across each phase is documented below.
+
+---
+
+## 1. High-Level Architectural Decisions
+
+| # | Decision Area | Chosen Approach | Rationale & Trade-off |
+|---|---|---|---|
+| **D-01** | **System Topology** | **Modular Monolith** (FastAPI + Python 3.11) | Microservices add unnecessary RPC overhead and deployment complexity for a stateful evaluation harness. |
+| **D-02** | **Core Philosophy** | **LLM for language phrasing only; deterministic code for correctness** | LLMs hallucinate numbers, prices, dates, and state transitions. System state, eligibility, and grounding must remain strictly deterministic. |
+| **D-03** | **State & Storage** | **Redis for hot state + InMemory fallback; PostgreSQL for audit/replay** | Judge calls have sub-second latency targets (or 30s hard limit). Hot state lookups must be O(1). DB persistence is separated from the critical request path. |
+| **D-04** | **Framework Avoidance** | **No LangChain / LangGraph / Vector DB** | LangChain abstractions obscure debugging. Vector DB is unnecessary because the judge injects structured context directly into `POST /v1/context`. |
+| **D-05** | **LLM Client Layer** | **Thin multi-provider abstraction (`LLMClient`)** | Decouples prompts from specific APIs (OpenAI, Gemini, Anthropic) and enables offline mock testing with `judge_simulator.py`. |
+
+---
+
+## 2. API Contract & Endpoint Decisions (`/v1/*`)
+
+| # | Endpoint | Key Decision & Rule | Mapping to Datasets / Simulator |
+|---|---|---|---|
+| **D-06** | `POST /v1/context` | **Strict version gating:**<br>• `incoming < current` $\rightarrow$ `409 stale_version`<br>• `incoming == current` $\rightarrow$ `200 no-op`<br>• `incoming > current` $\rightarrow$ atomic overwrite | Handles dynamic updates in Phase 3 (e.g. updating `CategoryContext` or `MerchantContext` snapshots without restart). Maps to `dataset/categories/*.json` and `dataset/merchants_seed.json`. |
+| **D-07** | `POST /v1/tick` | **Selective proactive firing + Cooldown:** Max 1 message per merchant per tick. Empty actions list is valid. | Prevents spamming merchants. Maps to trigger evaluation in `dataset/triggers_seed.json`. |
+| **D-08** | `POST /v1/reply` | **Deterministic multi-turn handling:** Return `action: "send"` \| `"wait"` \| `"end"`. | Handles merchant responses. Never burn turns if merchant indicates lack of interest or sends auto-replies. |
+| **D-09** | `GET /v1/healthz` | **Zero LLM dependency:** Liveness check returns context counts directly from memory/Redis. | If the LLM provider experiences latency or transient errors, `/healthz` stays green to avoid judge disqualification (3 failures = disqualified). |
+| **D-10** | `GET /v1/metadata` | **Static configuration response:** Returns bot metadata, team info, model identifier, and strategy. | Required by Phase 1 warmup verification. |
+
+---
+
+## 3. Context & State Management Decisions
+
+| # | Decision Area | Chosen Approach | Dataset / File Mapping |
+|---|---|---|---|
+| **D-11** | **Context Scopes** | Support the 4 formal schemas: `CategoryContext`, `MerchantContext`, `CustomerContext`, `TriggerContext`. | `dataset/categories/*.json`, `dataset/merchants_seed.json`, `dataset/customers_seed.json`, `dataset/triggers_seed.json`. |
+| **D-12** | **Dynamic Authority** | **Never bake dataset files as static constants.** The context store must be dynamically populated and updated. | Phase 3 of judge simulator explicitly injects adaptive changes (e.g. updated metrics, new digest items). |
+| **D-13** | **Dual-Level State** | Maintain both: (1) `ConversationState` (per `conversation_id`), and (2) `MerchantInteractionState` (per `merchant_id`). | Solves the simulator bug/behavior where repeated canned auto-replies use *different* `conversation_id`s. |
+| **D-14** | **Missing Context Fallback** | If `POST /v1/reply` receives an uninitialized `conversation_id`, auto-create a fallback state and classify intent immediately. | Resolves edge-cases in the judge replay scenarios where reply occurs without an established preceding session. |
+
+---
+
+## 4. Trigger Routing, Priority & Suppression Decisions
+
+| # | Decision Area | Chosen Approach | Implementation Rule & Mapping |
+|---|---|---|---|
+| **D-15** | **Trigger Eligibility Pipeline** | 8-step deterministic filter:<br>1. Trigger exists & unexpired<br>2. Not previously consumed<br>3. Suppression key not active<br>4. Required contexts present (merchant, category, customer)<br>5. No active STOP/unsubscribe state<br>6. Merchant cooldown respected<br>7. Customer consent verified (for customer scope)<br>8. Within allowed send window | Directly maps to `urgency`, `expires_at`, and `suppression_key` attributes in `triggers_seed.json` (e.g., `research:dentists:2026-W17`, `recall:c_001:6mo`). |
+| **D-16** | **Trigger Ranking** | Heuristic ranking function:<br>`Priority = urgency + freshness + merchant_relevance + engagement_potential - recent_contact_penalty` | Selects the highest-impact trigger when multiple candidates are active at `POST /v1/tick`. |
+| **D-17** | **Message Deduplication** | Hash normalized outbound message bodies (`SHA-256(normalize(body))`). Reject if hash was sent within the suppression window. | Prevents identical template messages from spamming the merchant. |
+| **D-18** | **Session Window Logic** | Track 24-hour WhatsApp messaging window. Use approved template framing when outside the 24-hour window, and conversational free-form within the window. | Modeled internally to match WhatsApp Business API standards. |
+
+---
+
+## 5. Conversation Policy & Problem Resolution Decisions
+
+| # | Problem Area | Chosen Approach | Example / Benchmark |
+|---|---|---|---|
+| **D-19** | **Auto-Reply Hell (Problem 1)** | Multi-signal detection:<br>• Repeated message hash ($\ge 3$ occurrences)<br>• Canned phrase substring matching ("Thank you for contacting...", "Our team will respond...")<br>• Consecutive answers without answering questions.<br>**Action:** Max 1 polite recovery attempt, then immediately `end` or `wait`. | Benchmark: `judge_simulator.py` scenario `auto_reply_hell`. Does not waste LLM turns. |
+| **D-20** | **Intent Handoff (Problem 2)** | Pre-LLM deterministic classification for `POSITIVE_COMMITMENT` ("yes let's do it", "proceed", "I want to join"). Immediately transition state from `ENGAGED` to `ACTION`. | Benchmark: Case studies and `intent_transition` replay. Bot must **not** ask another qualification question. |
+| **D-21** | **Hostile & Stop Handling** | Immediate opt-out upon detecting `STOP`, `UNSUBSCRIBE`, or abusive messages. Record merchant unsubscribe state and reply with `action: "end"`. | Fulfills WhatsApp compliance and simulator `hostile` scenario. |
+| **D-22** | **Off-Topic Boundaries** | Detect out-of-scope queries (e.g., coding, general trivia). Politely restate Vera's domain scope and redirect to marketing/business goals. | Prevents prompt-injection and hallucinated capabilities. |
+
+---
+
+## 6. Prompt Engineering & Composition Decisions
+
+| # | Decision Area | Chosen Approach | Rationale & Examples |
+|---|---|---|---|
+| **D-23** | **Prompt Templating** | Modular Jinja2 templates partitioned by scope (`prompts/merchant/`, `prompts/customer/`, `prompts/conversation/`). | Prevents monolithic token bloat; injects only the relevant trigger schema and category voice. |
+| **D-24** | **Specific Copy Over Generic (Problem 3)** | Inject concrete service+price pairs (`den_001`: "Dental Cleaning @ ₹299", `sal_001`: "Haircut @ ₹99") instead of percentage discounts ("10% off"). | Solves the primary merchant disengagement issue highlighted in `challenge-brief.md` §3.3. |
+| **D-25** | **Message Construction Pattern** | 4-part message architecture:<br>`[Personalized Hook] + [Verifiable Fact/Digest] + [Why It Matters Now] + [Low-Friction Next Step (CTA)]` | Matches 50/50 scoring benchmark in `examples/case-studies.md` (Case 1 & 2). |
+| **D-26** | **Category Voice & Taboo Enforcement** | Inject category-specific tone and strict taboo word lists into system prompts: e.g. Dentists taboo: `guaranteed`, `100% safe`, `miracle`. | Prevents category fit deductions and legal/clinical penalties. |
+| **D-27** | **Single CTA Rule** | Outbound messages must have at most 1 binary or low-friction CTA (e.g. "Want me to draft it?"). Avoid multi-choice branching. | Increases conversion and merchant response rates. |
+
+---
+
+## 7. Grounding, Validation & Error Recovery Decisions
+
+| # | Decision Area | Chosen Approach | Rationale & Implementation |
+|---|---|---|---|
+| **D-28** | **Deterministic Validator** | Regex and context intersection checking for:<br>• Every number, price, and percentage<br>• Clinic / Merchant names<br>• Source citations (e.g. "JIDA Oct 2026, p.14")<br>• Taboo vocabulary | Judge penalizes hallucinated data heavily (-15 penalty). Strict code validation guarantees zero hallucination. |
+| **D-29** | **Self-Correction & Fallback** | 2-step retry loop:<br>`LLM Generation` $\rightarrow$ `Validator Fail` $\rightarrow$ `1 Repair LLM Call` $\rightarrow$ `Validator Fail` $\rightarrow$ `Deterministic Fallback Template`. | Ensures the service never fails the request and stays within the 5-8 second SLA. |
+| **D-30** | **Missing Data Rule** | Never invent missing facts. If an offer, appointment, or customer record is absent, omit the claim or discard the trigger. | Principle 3 of `readme.md`: "Missing information must remain missing." |
+
+---
+
+## 8. Implementation Phase Roadmap & Milestones
+
+| Phase | Title | Core Deliverables | Verification Milestone |
+|---|---|---|---|
+| **Phase 0** | Contract Freeze | Pydantic v2 data models for all 4 contexts, HTTP request/response schemas, state machine enums. | Unit tests validate parsing against `dataset/` seed files. |
+| **Phase 1** | API & State Foundation | FastAPI app, all 5 endpoints, Redis/In-Memory context store with version conflict checks (`409`), basic health & metadata. | Judge `warmup` scenario passes (255 contexts ingested cleanly). |
+| **Phase 2** | Trigger & Suppression | Trigger resolver, TTL expiry, deduplication hasher, suppression manager, priority ranking. | Unit tests confirm duplicate triggers and expired events are blocked. |
+| **Phase 3** | Conversation Intelligence | Intent classifiers (regex + keywords), auto-reply tracker, hostile/STOP handler, conversation state machine. | Judge scenarios `auto_reply_hell`, `intent_transition`, and `hostile` pass. |
+| **Phase 4** | LLM Composer | Jinja2 templates, structured output schema, provider client abstraction, rationale generation. | Golden scenario generation matches `examples/case-studies.md`. |
+| **Phase 5** | Grounding Validator | Numeric, entity, offer, source, and taboo validators with repair/deterministic fallback mechanism. | Zero hallucination penalties in simulated runs. |
+| **Phase 6** | Adaptive Testing | Dynamic context update handling (v1 $\rightarrow$ v2 updates, mid-test triggers/customers). | Simulator adaptive tests pass cleanly. |
+| **Phase 7** | Tuning & Benchmark | Latency optimization (\<5s per turn), scoring analysis across all 5 dimensions. | Final run of `python judge_simulator.py --scenario full_evaluation`. |
+
+---
+
+## 9. Phase 0 Implementation Decisions & Execution Log
+
+| Decision ID | Target Module | Decision Detail | Verification |
+|---|---|---|---|
+| **D-P0-01** | `app/models/contexts.py` | Built strict Pydantic v2 schemas for all four context types (`CategoryPayload`, `MerchantPayload`, `CustomerPayload`, `TriggerPayload`). Implemented `extra="ignore"` and field aliases (`from` as `from_`, `register` as `register_tone`) to support seed JSON payloads and avoid attribute shadowing. | Verified by parsing all seed datasets in `dataset/` (categories, merchants, customers, triggers). |
+| **D-P0-02** | `app/models/requests.py` | Defined typed request schemas for `POST /v1/context` (`ContextPushRequest`), `POST /v1/tick` (`TickRequest`), and `POST /v1/reply` (`ReplyRequest`) matching `challenge-testing-brief.md` specification. | Validated against expected payloads from `judge_simulator.py`. |
+| **D-P0-03** | `app/models/responses.py` | Defined responses for all 5 HTTP endpoints: `ContextPushResponse` (200), `ContextConflictResponse` (409 stale), `TickResponse` with `ProactiveAction`, `ReplyResponse`, `HealthResponse` (`status="ok"`, `uptime_seconds`, `contexts_loaded`), and `MetadataResponse`. | Tested schema validation in test suite. |
+| **D-P0-04** | `app/models/conversation.py` | Established enums `ConversationStateEnum` (NEW, ENGAGED, ANSWERING, ACTION, AUTO_REPLY, WAITING, ENDED) and `IntentEnum` (STOP, NOT_INTERESTED, POSITIVE_COMMITMENT, QUESTION, INFORMATIONAL, AUTO_REPLY, HOSTILE, OFF_TOPIC, UNKNOWN), along with `MerchantInteractionState` for cross-conversation auto-reply tracking. | Verified state initialization and enum serialization in unit tests. |
+| **D-P0-05** | `app/config.py` | Implemented `pydantic-settings` based centralized configuration for metadata (`team_name`, `model`, `approach`), server settings, Redis URLs, and LLM configuration with environment variable override. | Tested default settings loading. |
+| **D-P0-06** | `tests/test_phase0_schemas.py` | Implemented unit test suite verifying schema compatibility against the real dataset files. | Ran via `pytest tests/test_phase0_schemas.py` — 6/6 tests passing (100%). |
+
