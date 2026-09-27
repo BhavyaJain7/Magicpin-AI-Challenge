@@ -195,6 +195,7 @@ This document provides a concise, structured mapping between the implementation 
 | **D-P7-03** | `docker-compose.yml` | Provided multi-service orchestration pairing `vera-bot` with `redis:7-alpine`, pre-configured environment parameters, and restart policies for simple one-command deployment (`docker compose up`). | Compose configuration formatted. |
 | **D-P7-04** | `.env.example` | Documented configuration template specifying server ports, bot metadata (`team_name`, `version`, `model`), LLM providers (`gemini`, `openai`, `mock`), API keys, and Redis connection strings. | Template created. |
 | **D-P7-05** | Final System Verification | Ran the complete automated test suite across all 7 phases: **31/31 tests passing (100%)**. Confirmed all contract schemas, healthz probes, version conflicts, deduplication, auto-reply detection, intent handoffs, grounding checks, and adaptive injections operate with zero defects. | Verified via `pytest tests/ -v`. |
+| **D-P7-06** | `judge_simulator.py` & `.gitignore` | Hardcoded API keys completely removed from code. Updated `judge_simulator.py` to dynamically load `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, and `BOT_URL` from `.env` using `python-dotenv`. Added `.env` to `.gitignore` ensuring secrets are never committed to version control. | Verified via git scan and environment loading test. |
 
 
 

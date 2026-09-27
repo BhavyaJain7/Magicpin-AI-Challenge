@@ -16,33 +16,41 @@ That's it!
 Author: magicpin AI Challenge Team
 """
 
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Automatically load environment variables from .env file in project root
+ROOT_DIR = Path(__file__).parent
+env_path = ROOT_DIR / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
+
 # =============================================================================
-# ██████  CONFIGURATION - EDIT THIS SECTION ██████
+# CONFIGURATION - LOADED DYNAMICALLY FROM .ENV
 # =============================================================================
 
 # Your bot's URL (where your bot is running)
-BOT_URL = "http://localhost:8080"
+BOT_URL = os.environ.get("BOT_URL", "https://magicpin-vera-bot-7zg3.onrender.com/")
 
 # Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
-LLM_PROVIDER = "openai"
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 
-# Your API key (paste your key here)
-LLM_API_KEY = ""  # <-- PUT YOUR API KEY HERE
+# Your API key (read from environment / .env)
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 
-# Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
-LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
+# Model to use
+LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-flash-latest")
 
 # For Ollama only: local server URL
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 # Which test to run by default
-TEST_SCENARIO = "all"
+TEST_SCENARIO = os.environ.get("TEST_SCENARIO", "all")
 
 # =============================================================================
-# ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
-# =============================================================================
-
-import os
 import sys
 import json
 import time
@@ -209,7 +217,7 @@ class AnthropicProvider(LLMProvider):
 class GeminiProvider(LLMProvider):
     def __init__(self, api_key: str, model: str = ""):
         self.api_key = api_key
-        self.model = model or "gemini-1.5-flash"
+        self.model = model or "gemini-flash-latest"
 
     def name(self) -> str:
         return f"Gemini ({self.model})"
@@ -221,11 +229,32 @@ class GeminiProvider(LLMProvider):
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}
         }).encode("utf-8")
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        req = urlrequest.Request(url, data=body, headers={"Content-Type": "application/json"})
-        resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
-        data = json.loads(resp.read().decode("utf-8"))
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        models_to_try = [self.model]
+        if self.model != "gemini-flash-latest":
+            models_to_try.append("gemini-flash-latest")
+
+        last_err = None
+        for m in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={self.api_key}"
+            req = urlrequest.Request(url, data=body, headers={"Content-Type": "application/json"})
+            for attempt in range(3):
+                try:
+                    resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                except urlerror.HTTPError as e:
+                    last_err = e
+                    if e.code == 503 and attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    break
+                except Exception as e:
+                    last_err = e
+                    break
+
+        if last_err:
+            raise last_err
+        raise RuntimeError("Gemini completion failed")
 
 
 class DeepSeekProvider(LLMProvider):
@@ -740,7 +769,7 @@ class JudgeSimulator:
         qualifying = ["would you", "do you", "can you tell", "what if", "how about"]
         actioning = ["done", "sending", "draft", "here", "confirm", "proceed", "next"]
 
-        body_lower = body.lower()
+        body_lower = (body or "").lower()
         if any(w in body_lower for w in actioning) and not any(w in body_lower for w in qualifying):
             print_success("Bot correctly switched to ACTION mode")
         elif any(w in body_lower for w in qualifying):

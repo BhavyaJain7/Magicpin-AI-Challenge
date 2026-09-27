@@ -42,13 +42,26 @@ class ConversationStateMachine:
                 rationale="Merchant indicated hostility. Apologizing and terminating conversation gracefully.",
             )
 
-        # 3. Handle Auto-Reply Hell (Problem 1)
+        # 3. Handle Positive Commitment / Intent Handoff (Problem 2) - TOP PRIORITY
+        if intent == IntentEnum.POSITIVE_COMMITMENT or conv.state == ConversationStateEnum.ACTION:
+            conv.state = ConversationStateEnum.ACTION
+            # STRICT RULE: Must NOT ask qualifying questions (would you, do you, how about)
+            # Must take action: confirm, proceed, next steps
+            return ReplyResponse(
+                action="send",
+                body="Done! Proceeding with next steps now. Drafting the campaign and sending the confirmation to your WhatsApp.",
+                cta="none",
+                rationale="Positive commitment recognized. Switched directly to ACTION mode without re-qualifying.",
+            )
+
+        # 4. Handle Auto-Reply Hell (Problem 1)
         if is_auto_reply:
             conv.auto_reply_count += 1
             conv.state = ConversationStateEnum.AUTO_REPLY
 
             # If this merchant has sent repeated auto-replies >= 2 times across any session -> END immediately
-            msg_count = mx_state.repeated_auto_reply_hashes.get(mx_state.recent_message_hashes[-1], 1)
+            msg_hash = mx_state.recent_message_hashes[-1] if mx_state.recent_message_hashes else ""
+            msg_count = mx_state.repeated_auto_reply_hashes.get(msg_hash, 1)
             if msg_count >= 2 or conv.auto_reply_count >= 2:
                 conv.state = ConversationStateEnum.ENDED
                 conv.ended = True
@@ -64,25 +77,13 @@ class ConversationStateMachine:
                 rationale="Automated response received. Backing off 30 minutes to allow human response.",
             )
 
-        # 4. Handle Not Interested
+        # 5. Handle Not Interested
         if intent == IntentEnum.NOT_INTERESTED:
             conv.state = ConversationStateEnum.ENDED
             conv.ended = True
             return ReplyResponse(
                 action="end",
                 rationale="Merchant stated not interested. Respectfully ending conversation.",
-            )
-
-        # 5. Handle Positive Commitment / Intent Handoff (Problem 2)
-        if intent == IntentEnum.POSITIVE_COMMITMENT or conv.state == ConversationStateEnum.ACTION:
-            conv.state = ConversationStateEnum.ACTION
-            # STRICT RULE: Must NOT ask qualifying questions (would you, do you, how about)
-            # Must take action: confirm, proceed, next steps
-            return ReplyResponse(
-                action="send",
-                body="Done! Proceeding with next steps now. Drafting the campaign and sending the confirmation to your WhatsApp.",
-                cta="none",
-                rationale="Positive commitment recognized. Switched directly to ACTION mode without re-qualifying.",
             )
 
         # 6. Handle Questions / Informational

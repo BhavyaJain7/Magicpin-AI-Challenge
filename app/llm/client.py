@@ -104,9 +104,9 @@ class MockLLMClient(LLMClient):
 class GeminiClient(LLMClient):
     """Google Gemini API Provider."""
 
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, model_name: str = "gemini-3.8-flash"):
         self.api_key = api_key
-        self.model_name = model_name or "gemini-1.5-flash"
+        self.model_name = model_name or "gemini-3.8-flash"
         self.url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
 
     def generate(
@@ -175,7 +175,7 @@ def get_llm_client() -> LLMClient:
         return MockLLMClient()
 
     if provider == "gemini":
-        return GeminiClient(api_key=api_key, model_name=settings.LLM_MODEL or "gemini-1.5-flash")
+        return GeminiClient(api_key=api_key, model_name=settings.LLM_MODEL or "gemini-3.8-flash")
     elif provider == "openai":
         return OpenAIClient(api_key=api_key, model_name=settings.LLM_MODEL or "gpt-4o-mini")
 

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     TEAM_NAME: str = "magicpin-ai-team"
     TEAM_MEMBERS: List[str] = Field(default_factory=lambda: ["Lead Engineer"])
     BOT_VERSION: str = "1.0.0"
-    MODEL_NAME: str = "gemini-1.5-flash"
+    MODEL_NAME: str = "gemini-3.8-flash"
     APPROACH: str = "Deterministic policy & state machine + 4-context grounded LLM composer with verification"
     CONTACT_EMAIL: str = "team@magicpin.in"
 
