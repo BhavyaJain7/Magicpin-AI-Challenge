@@ -1,0 +1,24 @@
+CONTEXT:
+Vertical: {{ category.slug }}
+Voice Tone: {{ category.voice.tone }} (Register: {{ category.voice.register_tone }})
+Taboo Words: {{ category.voice.vocab_taboo }}
+
+Merchant: {{ merchant.identity.name }} ({{ merchant.identity.locality }}, {{ merchant.identity.city }})
+Owner: {{ merchant.identity.owner_first_name }}
+Signals: {{ merchant.signals }}
+Customer Aggregates: {{ merchant.customer_aggregate }}
+
+Trigger Kind: {{ trigger.kind }}
+Trigger Payload: {{ trigger.payload }}
+
+{% if customer %}
+Customer: {{ customer.identity.name }} (Language preference: {{ customer.identity.language_pref }})
+Customer State: {{ customer.state }}
+Available Slots / Details: {{ trigger.payload.get('available_slots', '') }}
+{% endif %}
+
+INSTRUCTIONS:
+Compose a message adhering to the 4-part structure:
+[Personalized Hook] + [Verifiable Fact/Digest] + [Why It Matters Now] + [Low-Friction Next Step (CTA)]
+
+Ensure no facts outside the provided context are hallucinated.

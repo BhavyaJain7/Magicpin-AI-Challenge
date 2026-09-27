@@ -1,7 +1,14 @@
 """Unit tests for Phase 2: Trigger Routing, Suppression, and Cooldown."""
 
 import json
+import sys
 from pathlib import Path
+
+# Ensure project root is in sys.path when running script directly
+ROOT_DIR = Path(__file__).parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
@@ -11,7 +18,7 @@ from app.state.conversation_store import conversation_store
 from app.suppression.manager import suppression_manager
 
 client = TestClient(app)
-DATASET_DIR = Path(__file__).parent.parent / "dataset"
+DATASET_DIR = ROOT_DIR / "dataset"
 
 
 @pytest.fixture(autouse=True)

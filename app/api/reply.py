@@ -1,7 +1,9 @@
 """POST /v1/reply endpoint."""
 
 from fastapi import APIRouter
-from app.models.conversation import IntentEnum
+from app.conversation.auto_reply import AutoReplyDetector
+from app.conversation.intent import IntentDetector
+from app.conversation.state_machine import ConversationStateMachine
 from app.models.requests import ReplyRequest
 from app.models.responses import ReplyResponse
 from app.state.conversation_store import conversation_store
@@ -11,7 +13,7 @@ router = APIRouter()
 
 @router.post("/v1/reply", response_model=ReplyResponse)
 async def reply(req: ReplyRequest):
-    # Record incoming turn and update conversation and merchant interaction states
+    # 1. Record incoming turn in conversation and merchant state (handles unknown session recovery)
     conv, mx_state = conversation_store.record_incoming_turn(
         conversation_id=req.conversation_id,
         merchant_id=req.merchant_id,
@@ -21,23 +23,20 @@ async def reply(req: ReplyRequest):
         customer_id=req.customer_id,
     )
 
-    # Initial deterministic classification baseline for Phase 1
-    # Full multi-turn intent policy will be enriched in Phase 3
-    msg_lower = req.message.lower().strip()
+    # 2. Detect intent
+    intent, confidence = IntentDetector.detect_intent(req.message)
+    conv.detected_intent = intent
 
-    if "stop" in msg_lower or "unsubscribe" in msg_lower:
-        conv.detected_intent = IntentEnum.STOP
-        conv.ended = True
-        mx_state.unsubscribed = True
-        return ReplyResponse(
-            action="end",
-            rationale="Opt-out requested by user. Ended conversation gracefully.",
-        )
+    # 3. Detect auto-reply across merchant session history
+    is_auto_reply, _ = AutoReplyDetector.evaluate(req.message, mx_state)
 
-    # Return baseline acknowledge turn
-    return ReplyResponse(
-        action="send",
-        body="Understood. We are processing this for your business.",
-        cta="open_ended",
-        rationale="Acknowledged merchant message.",
+    # 4. Process state transition and return action
+    response = ConversationStateMachine.process_turn(
+        conv=conv,
+        mx_state=mx_state,
+        message=req.message,
+        intent=intent,
+        is_auto_reply=is_auto_reply,
     )
+
+    return response

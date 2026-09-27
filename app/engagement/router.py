@@ -2,6 +2,7 @@
 
 import uuid
 from typing import List, Optional, Tuple
+from app.engagement.composer import llm_composer
 from app.engagement.policies import EngagementPolicies
 from app.models.contexts import CategoryPayload, CustomerPayload, MerchantPayload, TriggerPayload
 from app.models.responses import ProactiveAction
@@ -129,31 +130,26 @@ class TriggerRouter:
             if trigger.merchant_id in merchants_seen_this_tick:
                 continue  # Max 1 proactive action per merchant per tick
 
-            # Assemble baseline message body according to trigger type
-            # (In Phase 4, the LLM Composer takes over dynamic text generation)
-            send_as = "vera" if trigger.scope == "merchant" else "merchant_on_behalf"
-            cta = self.policies.get_cta_policy(trigger)
-            conv_id = f"conv_{uuid.uuid4().hex[:8]}"
+            # Compose dynamic grounded message using LLMComposer
+            composed = llm_composer.compose_proactive_message(
+                category=category,
+                merchant=merchant,
+                trigger=trigger,
+                customer=customer,
+            )
 
-            if trigger.kind == "research_digest":
-                body = (
-                    f"{category.voice.salutation_examples[0].format(first_name=merchant.identity.owner_first_name or 'Doctor')}, "
-                    f"a new research paper in your category was published. "
-                    f"Would you like me to pull the abstract and draft a patient update for {merchant.identity.name}?"
-                )
-                rationale = f"Proactive research digest update grounded in {merchant.category_slug} category context."
-            elif trigger.kind == "recall_due" and customer:
-                body = (
-                    f"Hi {customer.identity.name}, {merchant.identity.name} here. "
-                    f"Your scheduled visit window is open. Reply to book your preferred slot."
-                )
-                rationale = f"Customer recall due reminder for {customer.customer_id}."
-            else:
-                body = (
-                    f"Hi {merchant.identity.name}, Vera here with an update regarding {trigger.kind}. "
-                    f"Let's review this to keep your business profile performing strong."
-                )
-                rationale = f"Proactive alert for trigger {trigger.kind}."
+            body = composed.get("body", "")
+            cta = composed.get("cta", self.policies.get_cta_policy(trigger))
+            send_as = composed.get(
+                "send_as",
+                "vera" if trigger.scope == "merchant" else "merchant_on_behalf",
+            )
+            template_params = composed.get("template_params", [merchant.identity.name])
+            rationale = composed.get(
+                "rationale",
+                f"Proactive outreach for trigger {trigger.kind} grounded in context.",
+            )
+            conv_id = f"conv_{uuid.uuid4().hex[:8]}"
 
             # Check message deduplication
             if suppression_manager.has_duplicate_message(body):
@@ -166,7 +162,7 @@ class TriggerRouter:
                 send_as=send_as,
                 trigger_id=trigger.id,
                 template_name=f"vera_{trigger.kind}_v1",
-                template_params=[merchant.identity.name],
+                template_params=template_params,
                 body=body,
                 cta=cta,
                 suppression_key=trigger.suppression_key,

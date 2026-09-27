@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  vera-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vera-merchant-bot
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - HOST=0.0.0.0
+      - DEBUG=false
+      - LLM_PROVIDER=${LLM_PROVIDER:-mock}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - TEAM_NAME=magicpin-ai-team
+      - BOT_VERSION=1.0.0
+      - REDIS_URL=redis://redis:6379/0
+      - USE_IN_MEMORY_STATE=true
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: vera-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
