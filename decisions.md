@@ -109,3 +109,31 @@ This document provides a concise, structured mapping between the implementation 
 | **D-P0-05** | `app/config.py` | Implemented `pydantic-settings` based centralized configuration for metadata (`team_name`, `model`, `approach`), server settings, Redis URLs, and LLM configuration with environment variable override. | Tested default settings loading. |
 | **D-P0-06** | `tests/test_phase0_schemas.py` | Implemented unit test suite verifying schema compatibility against the real dataset files. | Ran via `pytest tests/test_phase0_schemas.py` — 6/6 tests passing (100%). |
 
+---
+
+## 10. Phase 1 Implementation Decisions & Execution Log
+
+| Decision ID | Target Module | Decision Detail | Verification |
+|---|---|---|---|
+| **D-P1-01** | `app/state/context_store.py` | Built thread-safe singleton store supporting all four scopes with strict atomic version gating: `incoming < stored` $\rightarrow$ `409 StaleVersionError`, `incoming == stored` $\rightarrow$ `200` idempotent no-op, `incoming > stored` $\rightarrow$ atomic overwrite. Tracks live scope counts for `/v1/healthz`. | Verified with test suite (`test_context_push_and_versioning`) and live judge simulator push. |
+| **D-P1-02** | `app/state/conversation_store.py` | Built dual-level conversation store managing per-conversation sessions (`ConversationState`) and merchant-level interaction history (`MerchantInteractionState`) with normalized text hashing (`SHA-256`) to track repeated canned auto-replies across changing session IDs. | Tested with automated turn recording and hash tracking. |
+| **D-P1-03** | `app/api/health.py` & `metadata.py` | Exposed high-availability `GET /v1/healthz` (100% decoupled from LLM to prevent disqualification) and `GET /v1/metadata` conforming to warmup specifications. | Simulator verified: `healthz` [PASS], `metadata` [PASS]. |
+| **D-P1-04** | `app/api/context.py` | Exposed `POST /v1/context` mapped to `ContextStore`, returning HTTP 200 with `ack_id` on success, or HTTP 409 JSON payload with `current_version` on stale version clash. | Tested with automated tests and full judge warmup context push. |
+| **D-P1-05** | `app/api/tick.py` & `reply.py` | Built baseline proactive tick receiver (`/v1/tick`) returning structured actions list (empty list default) and reply receiver (`/v1/reply`) recording turn history and handling immediate opt-out on `STOP`. | Integration tests passed: `test_tick_endpoint`, `test_reply_endpoint`, `test_reply_stop_intent`. |
+| **D-P1-06** | `app/main.py` | Configured FastAPI application with CORS middleware, lifespan event handlers, and unified routing across all 5 endpoints. | Started live server on `http://127.0.0.1:8080`; executed `JudgeSimulator._warmup()`, achieving 100% PASS across category and merchant context pushes. |
+
+---
+
+## 11. Phase 2 Implementation Decisions & Execution Log
+
+| Decision ID | Target Module | Decision Detail | Verification |
+|---|---|---|---|
+| **D-P2-01** | `app/suppression/manager.py` | Implemented `SuppressionManager` with thread-safe management of active suppression keys (`suppression_key` with optional expiration), consumed trigger IDs, and per-merchant proactive contact timestamps to enforce cooldown periods (default: 3600 seconds). | Tested via `test_suppression_key_prevents_repeat_sends` in pytest suite. |
+| **D-P2-02** | `app/suppression/manager.py` | Integrated strict trigger TTL expiration comparing simulated timestamp `now` against ISO `expires_at`. Triggers are discarded deterministically once `now > expires_at`. | Tested via `test_trigger_expiry_filter`. |
+| **D-P2-03** | `app/suppression/manager.py` | Implemented customer consent enforcement for customer-scoped triggers (e.g. `recall_due` requires `recall_reminders` consent scope; `wedding_package_followup` requires bridal or appointment consent). | Tested via `test_customer_consent_enforcement`. |
+| **D-P2-04** | `app/engagement/policies.py` | Built `EngagementPolicies` enforcing context readiness (merchant, category, customer, and unsubscribed check) along with CTA policy selection (`binary` for action/recall vs `open_ended` for research digest). | Validated in integration tests with complete dataset fixtures. |
+| **D-P2-05** | `app/engagement/router.py` | Built `TriggerRouter` featuring multi-attribute heuristic ranking: `Priority = urgency * 10 + relevance_boosts`. Strictly caps proactive outbound actions to at most 1 message per merchant per tick to avoid spam. | Tested via `test_max_one_action_per_merchant_per_tick`. |
+| **D-P2-06** | `app/api/tick.py` | Wired `TriggerRouter` directly to `POST /v1/tick`. Evaluates `available_triggers`, checks suppression, records consumed actions, and emits fully populated `ProactiveAction` items. | Verified across 5 dedicated tests in `tests/test_phase2_triggers_suppression.py` — 100% passing. |
+
+
+
