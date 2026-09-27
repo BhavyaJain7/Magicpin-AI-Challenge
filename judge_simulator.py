@@ -230,22 +230,25 @@ class GeminiProvider(LLMProvider):
         }).encode("utf-8")
 
         models_to_try = [self.model]
-        if self.model != "gemini-flash-latest":
-            models_to_try.append("gemini-flash-latest")
+        for alt in ["gemini-3.7-flash", "gemini-3.8-flash", "gemini-flash-latest"]:
+            if alt not in models_to_try:
+                models_to_try.append(alt)
 
         last_err = None
         for m in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={self.api_key}"
             req = urlrequest.Request(url, data=body, headers={"Content-Type": "application/json"})
-            for attempt in range(3):
+            for attempt in range(4):
                 try:
                     resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
                     data = json.loads(resp.read().decode("utf-8"))
                     return data["candidates"][0]["content"]["parts"][0]["text"]
                 except urlerror.HTTPError as e:
                     last_err = e
-                    if e.code == 503 and attempt < 2:
-                        time.sleep(1.5 * (attempt + 1))
+                    if e.code in (429, 503) and attempt < 3:
+                        # Exponential backoff on rate limit or service spike
+                        wait_time = 3.0 * (attempt + 1)
+                        time.sleep(wait_time)
                         continue
                     break
                 except Exception as e:
